@@ -17,134 +17,113 @@
 import Foundation
 import ObjectiveC
 
+@available(iOS 8.0, *)
 class XWVBindingObject : XWVScriptObject {
-    private let key = unsafeAddressOf(XWVScriptObject)
-    private var proxy: XWVInvocation!
-    final var plugin: AnyObject { return proxy.target }
+    let key = unsafeAddressOf(XWVScriptObject)
+    var object: AnyObject!
 
     init(namespace: String, channel: XWVChannel, object: AnyObject) {
         super.init(namespace: namespace, channel: channel, origin: nil)
-        proxy = bindObject(object)
+        self.object = object
+        objc_setAssociatedObject(object, key, self, objc_AssociationPolicy.OBJC_ASSOCIATION_ASSIGN)
+        startKVO()
     }
 
-    init?(namespace: String, channel: XWVChannel, arguments: [AnyObject]?) {
+    init(namespace: String, channel: XWVChannel, arguments: [AnyObject]?) {
         super.init(namespace: namespace, channel: channel, origin: nil)
-        let cls: AnyClass = channel.typeInfo.plugin
         let member = channel.typeInfo[""]
         guard member != nil, case .Initializer(let selector, let arity) = member! else {
-            log("!Plugin class \(cls) is not a constructor")
-            return nil
+            preconditionFailure("FATAL: Plugin is not a constructor")
         }
 
-        var arguments = arguments?.map(wrapScriptObject) ?? []
+        var args = arguments?.map(wrapScriptObject) ?? []
         var promise: XWVScriptObject?
-        if arity == Int32(arguments.count) - 1 || arity < 0 {
-            promise = arguments.last as? XWVScriptObject
-            arguments.removeLast()
+        if arity == Int32(args.count) - 1 || arity < 0 {
+            promise = args.last as? XWVScriptObject
+            args.removeLast()
         }
         if selector == "initByScriptWithArguments:" {
-            arguments = [arguments]
+            args = [args]
         }
-
-        let args: [Any!] = arguments.map{ $0 !== NSNull() ? ($0 as Any) : nil }
-        guard let instance = XWVInvocation.construct(cls, initializer: selector, withArguments: args) else {
-            log("!Failed to create instance for plugin class \(cls)")
-            return nil
-        }
-
-        proxy = bindObject(instance)
-        syncProperties()
-        promise?.callMethod("resolve", withArguments: [self], completionHandler: nil)
-    }
-
-    deinit {
-        (plugin as? XWVScripting)?.finalizeForScript?()
-        unbindObject(plugin)
-    }
-
-    private func bindObject(object: AnyObject) -> XWVInvocation {
-        let option: XWVInvocation.Option
-        if let queue = channel.queue {
-            option = .Queue(queue: queue)
-        } else if let thread = channel.thread {
-            option = .Thread(thread: thread)
-        } else {
-            option = .None
-        }
-        let proxy = XWVInvocation(target: object, option: option)
-
+        object = XWVInvocation(target: channel.typeInfo.plugin).call(Selector("alloc")) as? AnyObject
+        object = XWVInvocation(target: object).call(selector, withObjects: args)
         objc_setAssociatedObject(object, key, self, objc_AssociationPolicy.OBJC_ASSOCIATION_ASSIGN)
-
-        // Start KVO
-        if object is NSObject {
-            for (_, member) in channel.typeInfo.filter({ $1.isProperty }) {
-                let key = member.getter!.description
-                object.addObserver(self, forKeyPath: key, options: NSKeyValueObservingOptions.New, context: nil)
-            }
-        }
-        return proxy
-    }
-    private func unbindObject(object: AnyObject) {
-        objc_setAssociatedObject(object, key, nil, objc_AssociationPolicy.OBJC_ASSOCIATION_ASSIGN)
-
-        // Stop KVO
-        if object is NSObject {
-            for (_, member) in channel.typeInfo.filter({ $1.isProperty }) {
-                let key = member.getter!.description
-                object.removeObserver(self, forKeyPath: key, context: nil)
-            }
-        }
+        startKVO()
+        syncProperties()
+        promise?.callMethod("resolve", withArguments: [self], resultHandler: nil)
     }
     private func syncProperties() {
         var script = ""
         for (name, member) in channel.typeInfo.filter({ $1.isProperty }) {
-            let val: AnyObject! = proxy.call(member.getter!, withObjects: nil)
+            let val: AnyObject! = XWVInvocation(target: object).call(member.getter!, withObjects: nil)
             script += "\(namespace).$properties['\(name)'] = \(serialize(val));\n"
         }
         webView?.evaluateJavaScript(script, completionHandler: nil)
     }
 
+    deinit {
+        if (object as? XWVScripting)?.finalizeForScript != nil {
+            XWVInvocation(target: object)[Selector("finalizeForScript")]()
+        }
+        objc_setAssociatedObject(object, key, nil, objc_AssociationPolicy.OBJC_ASSOCIATION_ASSIGN)
+        stopKVO()
+    }
+
     // Dispatch operation to plugin object
-    func invokeNativeMethod(name: String, withArguments arguments: [AnyObject]) {
+    func invokeNativeMethod(name: String, withArguments arguments: [AnyObject]?) {
         if let selector = channel.typeInfo[name]?.selector {
-            var args = arguments.map(wrapScriptObject)
-            if plugin is XWVScripting && name.isEmpty && selector == Selector("invokeDefaultMethodWithArguments:") {
-                args = [args];
+            var args = arguments?.map(wrapScriptObject)
+            if object is XWVScripting && name.isEmpty && selector == Selector("invokeDefaultMethodWithArguments:") {
+                args = [args ?? []];
             }
-            proxy.asyncCall(selector, withObjects: args)
+            if channel.queue != nil {
+                dispatch_async(channel.queue) {
+                    XWVInvocation(target: self.object).call(selector, withObjects: args)
+                }
+            } else {
+                // FIXME: Add NSThread support back while migrate to Swift 2.0
+                XWVInvocation(target: object).call(selector, withObjects: args)
+            }
         }
     }
-    func updateNativeProperty(name: String, withValue value: AnyObject) {
+    func updateNativeProperty(name: String, withValue value: AnyObject!) {
         if let setter = channel.typeInfo[name]?.setter {
             let val: AnyObject = wrapScriptObject(value)
-            proxy.asyncCall(setter, withObjects: [val])
+            if channel.queue != nil {
+                dispatch_async(channel.queue) {
+                    XWVInvocation(target: self.object).call(setter, withObjects: [val])
+                }
+            } else {
+                // FIXME: Add NSThread support back while migrate to Swift 2.0
+                XWVInvocation(target: self.object)[name] = val
+            }
         }
     }
 
     // override methods of XWVScriptObject
-    override func callMethod(name: String, withArguments arguments: [AnyObject]?, completionHandler: ((AnyObject?, NSError?) -> Void)?) {
+    override func callMethod(name: String, withArguments arguments: [AnyObject]?, resultHandler: ((AnyObject!) -> Void)?) {
         if let selector = channel.typeInfo[name]?.selector {
-            let result: AnyObject! = proxy.call(selector, withObjects: arguments)
-            completionHandler?(result, nil)
+            let result: AnyObject! = XWVInvocation(target: object).call(selector, withObjects: arguments)
+            resultHandler?(result)
         } else {
-            super.callMethod(name, withArguments: arguments, completionHandler: completionHandler)
+            super.callMethod(name, withArguments: arguments, resultHandler: resultHandler)
         }
     }
-    override func callMethod(name: String, withArguments arguments: [AnyObject]?) throws -> AnyObject! {
+    override func callMethod(name: String, withArguments arguments: [AnyObject]?) -> AnyObject! {
         if let selector = channel.typeInfo[name]?.selector {
-            return proxy.call(selector, withObjects: arguments)
+            return XWVInvocation(target: object).call(selector, withObjects: arguments)
         }
-        return try super.callMethod(name, withArguments: arguments)
+        return super.callMethod(name, withArguments: arguments)
     }
     override func value(forProperty name: String) -> AnyObject? {
         if let getter = channel.typeInfo[name]?.getter {
-            return proxy.call(getter, withObjects: nil)
+            return XWVInvocation(target: object).call(getter, withObjects: nil)
         }
         return super.value(forProperty: name)
     }
     override func setValue(value: AnyObject?, forProperty name: String) {
         if channel.typeInfo[name]?.setter != nil {
-            proxy[name] = value
+            XWVInvocation(target: object)[name] = value
         } else {
             assert(channel.typeInfo[name] == nil, "Property '\(name)' is readonly")
             super.setValue(value, forProperty: name)
@@ -163,8 +142,21 @@ class XWVBindingObject : XWVScriptObject {
         let script = "\(namespace).$properties['\(prop)'] = \(serialize(change?[NSKeyValueChangeNewKey]))"
         webView.evaluateJavaScript(script, completionHandler: nil)
     }
+    private func startKVO() {
+        guard object is NSObject else { return }
+        for (_, member) in channel.typeInfo.filter({ $1.isProperty }) {
+            object.addObserver(self, forKeyPath: member.getter!.description, options: NSKeyValueObservingOptions.New, context: nil)
+        }
+    }
+    private func stopKVO() {
+        guard object is NSObject else { return }
+        for (_, member) in channel.typeInfo.filter({ $1.isProperty }) {
+            object.removeObserver(self, forKeyPath: member.getter!.description, context: nil)
+        }
+    }
 }
 
+@available(iOS 8.0, *)
 public extension NSObject {
     var scriptObject: XWVScriptObject? {
         return objc_getAssociatedObject(self, unsafeAddressOf(XWVScriptObject)) as? XWVScriptObject

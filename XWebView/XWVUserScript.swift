@@ -17,6 +17,7 @@
 import Foundation
 import WebKit
 
+@available(iOS 8.0, *)
 class XWVUserScript {
     weak var webView: WKWebView?
     let script: WKUserScript
@@ -45,7 +46,7 @@ class XWVUserScript {
         if webView.URL != nil {
             webView.evaluateJavaScript(script.source) {
                 if let error = $1 {
-                    log("!Failed to inject script. \(error)")
+                    print("<XWV> ERROR: Inject user script in context.\n\(error)")
                 }
             }
         }

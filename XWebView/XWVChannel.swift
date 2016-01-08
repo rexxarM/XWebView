@@ -16,20 +16,16 @@
 
 import Foundation
 import WebKit
-
+@available(iOS 8.0, *)
 public class XWVChannel : NSObject, WKScriptMessageHandler {
-    private(set) public var identifier: String?
-    public let thread: NSThread?
-    public let queue: dispatch_queue_t?
+    public let name: String
+    public let thread: NSThread!
+    public let queue: dispatch_queue_t!
     private(set) public weak var webView: WKWebView?
     var typeInfo: XWVMetaObject!
 
     private var instances = [Int: XWVBindingObject]()
     private var userScript: XWVUserScript?
-    private(set) var principal: XWVBindingObject {
-        get { return instances[0]! }
-        set { instances[0] = newValue }
-    }
 
     private class var sequenceNumber: UInt {
         struct sequence{
@@ -38,23 +34,21 @@ public class XWVChannel : NSObject, WKScriptMessageHandler {
         return ++sequence.number
     }
 
-    private static var defaultQueue: dispatch_queue_t = {
-        let label = "org.xwebview.default-queue"
-        return dispatch_queue_create(label, DISPATCH_QUEUE_SERIAL)
-    }()
-
-    public convenience init(webView: WKWebView) {
-        self.init(webView: webView, queue: XWVChannel.defaultQueue)
+    public convenience init(name: String?, webView: WKWebView) {
+        let queue = dispatch_queue_create(nil, DISPATCH_QUEUE_SERIAL)
+        self.init(name: name, webView:webView, queue: queue)
     }
-
-    public init(webView: WKWebView, queue: dispatch_queue_t) {
+    
+    public init(name: String?, webView: WKWebView, queue: dispatch_queue_t) {
+        self.name = name ?? "\(XWVChannel.sequenceNumber)"
         self.webView = webView
         self.queue = queue
         thread = nil
         webView.prepareForPlugin()
     }
-
-    public init(webView: WKWebView, thread: NSThread) {
+    
+    public init(name: String?, webView: WKWebView, thread: NSThread) {
+        self.name = name ?? "\(XWVChannel.sequenceNumber)"
         self.webView = webView
         self.thread = thread
         queue = nil
@@ -62,38 +56,30 @@ public class XWVChannel : NSObject, WKScriptMessageHandler {
     }
 
     public func bindPlugin(object: AnyObject, toNamespace namespace: String) -> XWVScriptObject? {
-        guard identifier == nil, let webView = webView else { return nil }
-
-        let id = (object as? XWVScripting)?.channelIdentifier ?? String(XWVChannel.sequenceNumber)
-        identifier = id
-        webView.configuration.userContentController.addScriptMessageHandler(self, name: id)
+        assert(typeInfo == nil, "<XWV> This channel already has a bound object")
+        guard let webView = webView else { return nil }
+        
+        webView.configuration.userContentController.addScriptMessageHandler(self, name: name)
         typeInfo = XWVMetaObject(plugin: object.dynamicType)
-        principal = XWVBindingObject(namespace: namespace, channel: self, object: object)
+        let plugin = XWVBindingObject(namespace: namespace, channel: self, object: object)
 
-        let script = WKUserScript(source: generateStubs(),
+        let stub = generateStub(plugin)
+        let script = WKUserScript(source: (object as? XWVScripting)?.javascriptStub?(stub) ?? stub,
                                   injectionTime: WKUserScriptInjectionTime.AtDocumentStart,
                                   forMainFrameOnly: true)
         userScript = XWVUserScript(webView: webView, script: script)
 
-        log("+Plugin object \(object) is bound to \(namespace) with channel \(id)")
-        return principal as XWVScriptObject
+        instances[0] = plugin
+        return plugin as XWVScriptObject
     }
 
     public func unbind() {
-        guard let id = identifier else { return }
-        let namespace = principal.namespace
-        let plugin = principal.plugin
+        assert(typeInfo != nil, "<XWV> Error: can't unbind inexistent plugin.")
         instances.removeAll(keepCapacity: false)
-        webView?.configuration.userContentController.removeScriptMessageHandlerForName(id)
-        userScript = nil
-        identifier = nil
-        log("+Plugin object \(plugin) is unbound from \(namespace)")
+        webView?.configuration.userContentController.removeScriptMessageHandlerForName(name)
     }
 
     public func userContentController(userContentController: WKUserContentController, didReceiveScriptMessage message: WKScriptMessage) {
-        // A workaround for crash when postMessage(undefined)
-        guard unsafeBitCast(message.body, COpaquePointer.self) != nil else { return }
-
         if let body = message.body as? [String: AnyObject], let opcode = body["$opcode"] as? String {
             let target = (body["$target"] as? NSNumber)?.integerValue ?? 0
             if let object = instances[target] {
@@ -101,81 +87,63 @@ public class XWVChannel : NSObject, WKScriptMessageHandler {
                     if target == 0 {
                         // Dispose plugin
                         unbind()
-                    } else if let instance = instances.removeValueForKey(target) {
-                        // Dispose instance
-                        log("+Instance \(target) is unbound from \(instance.namespace)")
+                        print("<XWV> Plugin was disposed")
                     } else {
-                        log("?Invalid instance id: \(target)")
+                        // Dispose instance
+                        let object = instances.removeValueForKey(target)
+                        assert(object != nil, "<XWV> Warning: bad instance id was received")
                     }
                 } else if let member = typeInfo[opcode] where member.isProperty {
                     // Update property
-                    object.updateNativeProperty(opcode, withValue: body["$operand"] ?? NSNull())
+                    object.updateNativeProperty(opcode, withValue: body["$operand"])
                 } else if let member = typeInfo[opcode] where member.isMethod {
                     // Invoke method
-                    if let args = (body["$operand"] ?? []) as? [AnyObject] {
-                        object.invokeNativeMethod(opcode, withArguments: args)
-                    } // else malformatted operand
-                } else {
-                    log("?Invalid member name: \(opcode)")
-                }
+                    let args = body["$operand"] as? [AnyObject]
+                    object.invokeNativeMethod(opcode, withArguments: args)
+                }  // else Unknown opcode
             } else if opcode == "+" {
                 // Create instance
                 let args = body["$operand"] as? [AnyObject]
-                let namespace = "\(principal.namespace)[\(target)]"
+                let namespace = "\(instances[0]!.namespace)[\(target)]"
                 instances[target] = XWVBindingObject(namespace: namespace, channel: self, arguments: args)
-                log("+Instance \(target) is bound to \(namespace)")
             } // else Unknown opcode
-        } else if let obj = principal.plugin as? WKScriptMessageHandler {
+        } else if let obj = instances[0]!.object as? WKScriptMessageHandler {
             // Plugin claims for raw messages
             obj.userContentController(userContentController, didReceiveScriptMessage: message)
         } else {
             // discard unknown message
-            log("-Unknown message: \(message.body)")
+            print("<XWV> WARNING: Unknown message: \(message.body)")
         }
     }
 
-    private func generateStubs() -> String {
-        func generateMethod(key: String, this: String, prebind: Bool) -> String {
-            let stub = "XWVPlugin.invokeNative.bind(\(this), '\(key)')"
+    private func generateStub(object: XWVBindingObject) -> String {
+        func generateMethod(this: String, name: String, prebind: Bool) -> String {
+            let stub = "XWVPlugin.invokeNative.bind(\(this), '\(name)')"
             return prebind ? "\(stub);" : "function(){return \(stub).apply(null, arguments);}"
         }
-        func rewriteStub(stub: String, forKey key: String) -> String {
-            return (principal.plugin as? XWVScripting)?.rewriteGeneratedStub?(stub, forKey: key) ?? stub
-        }
 
-        let prebind = !(typeInfo[""]?.isInitializer ?? false)
-        let stubs = typeInfo.reduce("") {
-            let key = $1.0
-            let member = $1.1
-            let stub: String
-            if member.isMethod && !key.isEmpty {
-                let method = generateMethod("\(key)\(member.type)", this: prebind ? "exports" : "this", prebind: prebind)
-                stub = "exports.\(key) = \(method)"
-            } else if member.isProperty {
-                let value = principal.serialize(principal[key])
-                stub = "XWVPlugin.defineProperty(exports, '\(key)', \(value), \(member.setter != nil));"
-            } else {
-                return $0
-            }
-            return $0 + rewriteStub(stub, forKey: key) + "\n"
-        }
-
-        let base: String
+        var base = "null"
+        var prebind = true
         if let member = typeInfo[""] {
             if member.isInitializer {
                 base = "'\(member.type)'"
+                prebind = false
             } else {
-                base = generateMethod("\(member.type)", this: "arguments.callee", prebind: false)
+                base = generateMethod("arguments.callee", name: "\(member.type)", prebind: false)
             }
-        } else {
-            base = rewriteStub("null", forKey: ".base")
         }
 
-        return rewriteStub(
-            "(function(exports) {\n" +
-                rewriteStub(stubs, forKey: ".local") +
-            "})(XWVPlugin.createPlugin('\(identifier!)', '\(principal.namespace)', \(base)));\n",
-            forKey: ".global"
-        )
+        var stub = "(function(exports) {\n"
+        for (name, member) in typeInfo {
+            if member.isMethod && !name.isEmpty {
+                let method = generateMethod(prebind ? "exports" : "this", name: "\(name)\(member.type)", prebind: prebind)
+                stub += "exports.\(name) = \(method)\n"
+            } else if member.isProperty {
+                let value = object.serialize(object[name])
+                stub += "XWVPlugin.defineProperty(exports, '\(name)', \(value), \(member.setter != nil));\n"
+            }
+        }
+        stub += "})(XWVPlugin.createPlugin('\(name)', '\(object.namespace)', \(base)));\n\n"
+        return stub
     }
 }

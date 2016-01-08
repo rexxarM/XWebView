@@ -142,7 +142,7 @@ class XWVMetaObject: CollectionType {
                     return true
                 }
             }
-            assert(members.indexForKey(name) == nil, "Plugin class \(plugin) has a conflict in member name '\(name)'")
+            assert(members.indexForKey(name) == nil, "Script name '\(name)' has conflict")
             members[name] = member
             return true
         }
