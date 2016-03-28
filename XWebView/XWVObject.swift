@@ -17,9 +17,11 @@
 import Foundation
 import WebKit
 
+@available(iOS 8.0, *)
 private let webViewInvalidated =
     NSError(domain: WKErrorDomain, code: WKErrorCode.WebViewInvalidated.rawValue, userInfo: nil)
 
+@available(iOS 8.0, *)
 public class XWVObject : NSObject {
     public let namespace: String
     private(set) public weak var webView: WKWebView?

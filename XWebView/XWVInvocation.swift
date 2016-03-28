@@ -16,6 +16,7 @@
 
 import Foundation
 import ObjectiveC
+import WebKit
 
 public class XWVInvocation {
     public final let target: AnyObject

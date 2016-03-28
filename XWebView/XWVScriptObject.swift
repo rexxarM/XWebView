@@ -16,6 +16,9 @@
 
 import Foundation
 
+import WebKit
+
+@available(iOS 8.0, *)
 public class XWVScriptObject : XWVObject {
     // JavaScript object operations
     public func construct(arguments arguments: [AnyObject]?, completionHandler: ((AnyObject?, NSError?) -> Void)?) {
@@ -98,6 +101,7 @@ public class XWVScriptObject : XWVObject {
     }
 }
 
+@available(iOS 8.0, *)
 extension XWVScriptObject {
     // Subscript as property accessor
     public subscript(name: String) -> AnyObject? {
@@ -118,6 +122,7 @@ extension XWVScriptObject {
     }
 }
 
+@available(iOS 8.0, *)
 class XWVWindowObject: XWVScriptObject {
     private let origin: XWVObject
     init(webView: WKWebView) {

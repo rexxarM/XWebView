@@ -17,6 +17,7 @@
 import Foundation
 import WebKit
 
+@available(iOS 8.0, *)
 public class XWVChannel : NSObject, WKScriptMessageHandler {
     private(set) public var identifier: String?
     public let runLoop: NSRunLoop?

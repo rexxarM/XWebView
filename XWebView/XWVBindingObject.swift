@@ -17,6 +17,7 @@
 import Foundation
 import ObjectiveC
 
+@available(iOS 8.0, *)
 final class XWVBindingObject : XWVScriptObject {
     unowned let channel: XWVChannel
     var plugin: AnyObject!
@@ -152,6 +153,7 @@ final class XWVBindingObject : XWVScriptObject {
     }
 }
 
+@available(iOS 8.0, *)
 extension XWVBindingObject {
     private static var key: pthread_key_t = {
         var key = pthread_key_t()
@@ -201,6 +203,7 @@ extension XWVBindingObject {
     }
 }
 
+@available(iOS 8.0, *)
 public extension XWVScriptObject {
     static var bindingObject: XWVScriptObject? {
         return XWVBindingObject.currentBindingObject
